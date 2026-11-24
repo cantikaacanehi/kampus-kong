@@ -12,6 +12,8 @@ using namespace std;
 // ---------------- Konstanta ----------------
 const int NUM_LEVEL  = 5;       // jumlah level = jumlah peta
 const int MAX_LANTAI = 5;       // kapasitas lantai per peta
+const int GRID_X = 60;          // lebar "logika" game (koordinat asli)
+const int GRID_Y = 24;          // tinggi "logika" game
 const int KIRI = 2;
 const int KANAN = 57;
 const int FRAME_MS = 50;
@@ -24,15 +26,8 @@ const int MAX_NYAWA = 5;        // batas maksimal "SKS"
 const char *FILE_HIGHSCORE = "highscore.txt";
 
 enum Warna {
-    W_PEMAIN = 1,
-    W_TUGAS,
-    W_LANTAI,
-    W_TANGGA,
-    W_BOSS,
-    W_KOPI,
-    W_TUJUAN,
-    W_NYAWA,
-    W_BEKU
+    W_PEMAIN = 1, W_TUGAS, W_LANTAI, W_TANGGA, W_BOSS,
+    W_KOPI, W_TUJUAN, W_NYAWA, W_BEKU
 };
 
 enum TipePowerUp {
@@ -45,7 +40,7 @@ enum HasilMain { HASIL_KELUAR, HASIL_GAMEOVER, HASIL_MENANG };
 
 // ---------------- Struktur data ----------------
 struct Pemain {
-    int x, y;       // y = baris tempat berdiri
+    int x, y;       // y = baris tempat berdiri (koordinat logika 60x24)
     int lompat;     // sisa frame lompat (0 = di tanah)
     int cooldown;   // jeda antar gerakan
     int kebal;      // sisa frame efek kebal (kopi)
@@ -115,11 +110,26 @@ void simpanHighScore(int h) {
     f << h;
 }
 
-// ---------------- Fungsi bantu ----------------
+// ---------------- Fungsi bantu tampilan ----------------
+// Logika game tetap memakai grid 60x24, tapi saat digambar semua koordinat
+// "dilar" mengikuti ukuran terminal (COLS x LINES) supaya arena memenuhi
+// layar, tidak mojok di kiri atas.
+int sx(int x) { return x * COLS / GRID_X; }
+int sy(int y) { return y * LINES / GRID_Y; }
+
 void tengah(int baris, const char *teks) {
     mvaddstr(baris, (COLS - (int)strlen(teks)) / 2, teks);
 }
 
+// Window di-resize -> reset mode terminal & paksa gambar ulang total,
+// supaya tidak ada sisa gambar lama yang "nyangkut" di layar.
+void paksaGambarUlang() {
+    endwin();
+    refresh();
+    clearok(curscr, TRUE);
+}
+
+// ---------------- Fungsi bantu logika ----------------
 int spawnX(const Map &m) {
     return m.arahAwal > 0 ? m.bossX + 11 : m.bossX - 2;
 }
@@ -132,6 +142,15 @@ bool diLantai(const Map &m, int y) {
     for (int i = 0; i < m.jumlahLantai; i++)
         if (y == m.lantai[i] - 1) return true;
     return false;
+}
+
+// Baris layar untuk objek (pemain/tugas/power-up). Kalau objek berdiri di
+// lantai, tempel tepat di atas garis '=' supaya tidak "melayang" saat layar
+// diperbesar.
+int syObjek(const Map &m, int y) {
+    for (int i = 0; i < m.jumlahLantai; i++)
+        if (y == m.lantai[i] - 1) return sy(m.lantai[i]) - 1;
+    return sy(y);
 }
 
 bool bisaNaik(const Map &m, const Pemain &p) {
@@ -169,7 +188,7 @@ void munculkanPowerUp(Game &g, int lantaiIdx = -1) {
 
 // ---------------- Setup ----------------
 void mulaiLevel(Game &g) {
-    g.map = &PETA[min(g.level, NUM_LEVEL) - 1];   // <-- pilih peta sesuai level
+    g.map = &PETA[min(g.level, NUM_LEVEL) - 1];   // pilih peta sesuai level
     const Map &m = *g.map;
 
     g.p = Pemain{m.pemainX, m.lantai[0] - 1, 0, 0, 0, 0};
@@ -224,7 +243,6 @@ void prosesInput(Game &g, int ch) {
 void munculkanTugas(Game &g) {
     const Map &m = *g.map;
     const char jenis[] = {'L', 'M', 'K', 'D'};
-    // Nilai dasar lebih besar agar kecepatan gerak tugas lebih santai
     int dasar = max(5, 9 - g.level);
     int kec[] = {dasar + 2, dasar + 1, dasar, max(4, dasar - 1)};
     int i = rand() % 4;
@@ -252,13 +270,11 @@ void gerakkanTugas(const Map &m, Tugas &t) {
 
 void updateTugas(Game &g) {
     const Map &m = *g.map;
-    // Jika efek beku aktif, tugas diam di tempat
-    if (g.p.beku > 0) return;
+    if (g.p.beku > 0) return;          // efek beku: tugas diam di tempat
 
-    const int MAX_TUGAS = min(7, 4 + g.level); // batasi jumlah tugas bersamaan
+    const int MAX_TUGAS = min(7, 4 + g.level);
 
     if (++g.spawnHitung >= g.jedaSpawn) {
-        // Pastikan tidak ada tugas lain yang masih terlalu dekat dengan Dosen Kong
         bool terlaluDekat = false;
         int lantaiAtas = barisPuncak(m) - 1;
         for (size_t i = 0; i < g.tugas.size(); i++) {
@@ -292,7 +308,6 @@ void updateTugas(Game &g) {
                   g.tugas.end());
 }
 
-// true bila pemain terkena tugas
 bool cekTabrakan(Game &g) {
     Pemain &p = g.p;
     bool kena = false;
@@ -347,32 +362,47 @@ void gambar(const Game &g) {
     const Map &m = *g.map;
     erase();
 
+    if (COLS < GRID_X || LINES < GRID_Y) {   // window dikecilkan di bawah minimum
+        tengah(LINES / 2, "Terminal terlalu kecil - perbesar window!");
+        refresh();
+        return;
+    }
+
     mvprintw(0, 0, "SKOR:%05d  HI:%05d  LVL:%d/%d  SKS:%d/%d%s%s",
              g.skor, g.highscore, g.level, NUM_LEVEL, g.nyawa, MAX_NYAWA,
              g.p.kebal > 0 ? " [KEBAL]" : "",
              g.p.beku > 0 ? " [BEKU]" : "");
 
+    // lantai: garis penuh dari kiri ke kanan layar
     attron(COLOR_PAIR(W_LANTAI));
-    for (int i = 0; i < m.jumlahLantai; i++)
-        for (int x = KIRI - 1; x <= KANAN + 1; x++) mvaddch(m.lantai[i], x, '=');
+    for (int i = 0; i < m.jumlahLantai; i++) {
+        int fy = sy(m.lantai[i]);
+        for (int x = sx(KIRI - 1); x <= sx(KANAN + 1); x++) mvaddch(fy, x, '=');
+    }
     attroff(COLOR_PAIR(W_LANTAI));
 
+    // tangga: kolom penuh dari lantai atas sampai menyentuh lantai bawah
     attron(COLOR_PAIR(W_TANGGA));
-    for (int s = 0; s < m.jumlahLantai - 1; s++)
-        for (int y = m.lantai[s + 1]; y <= m.lantai[s] - 1; y++) mvaddch(y, m.tanggaX[s], 'H');
+    for (int s = 0; s < m.jumlahLantai - 1; s++) {
+        int lx = sx(m.tanggaX[s]);
+        for (int y = sy(m.lantai[s + 1]); y <= sy(m.lantai[s]) - 1; y++) mvaddch(y, lx, 'H');
+    }
     attroff(COLOR_PAIR(W_TANGGA));
 
-    int atas = barisPuncak(m);
+    // Dosen Kong & Nilai A menempel di atas lantai puncak
+    int atas = sy(barisPuncak(m));
+    int bx = min(sx(m.bossX), COLS - 11);
     attron(COLOR_PAIR(W_BOSS) | A_BOLD);
-    mvaddstr(atas - 4, m.bossX, "DOSEN KONG");
-    mvaddstr(atas - 3, m.bossX, " \\(o.o)/ ");
-    mvaddstr(atas - 2, m.bossX, "  [KONG] ");
-    mvaddstr(atas - 1, m.bossX, "  /   \\  ");
+    mvaddstr(atas - 4, bx, "DOSEN KONG");
+    mvaddstr(atas - 3, bx, " \\(o.o)/ ");
+    mvaddstr(atas - 2, bx, "  [KONG] ");
+    mvaddstr(atas - 1, bx, "  /   \\  ");
     attroff(COLOR_PAIR(W_BOSS) | A_BOLD);
 
+    int gx = min(sx(m.tujuanX), COLS - 3);
     attron(COLOR_PAIR(W_TUJUAN) | A_BOLD);
-    mvaddstr(atas - 2, m.tujuanX - 1, "LULUS!");
-    mvaddstr(atas - 1, m.tujuanX, "(A)");
+    mvaddstr(atas - 2, max(0, min(gx - 1, COLS - 6)), "LULUS!");
+    mvaddstr(atas - 1, gx, "(A)");
     attroff(COLOR_PAIR(W_TUJUAN) | A_BOLD);
 
     for (size_t i = 0; i < g.powerup.size(); i++) {
@@ -380,59 +410,64 @@ void gambar(const Game &g) {
         if (!pu.aktif) continue;
         if (pu.tipe == PU_KEBAL) {
             attron(COLOR_PAIR(W_KOPI) | A_BOLD);
-            mvaddch(pu.y, pu.x, 'C');
+            mvaddch(syObjek(m, pu.y), sx(pu.x), 'C');
             attroff(COLOR_PAIR(W_KOPI) | A_BOLD);
         } else if (pu.tipe == PU_NYAWA) {
             attron(COLOR_PAIR(W_NYAWA) | A_BOLD);
-            mvaddch(pu.y, pu.x, '+');
+            mvaddch(syObjek(m, pu.y), sx(pu.x), '+');
             attroff(COLOR_PAIR(W_NYAWA) | A_BOLD);
         } else {
             attron(COLOR_PAIR(W_BEKU) | A_BOLD);
-            mvaddch(pu.y, pu.x, 'B');
+            mvaddch(syObjek(m, pu.y), sx(pu.x), 'B');
             attroff(COLOR_PAIR(W_BEKU) | A_BOLD);
         }
     }
 
     attron(COLOR_PAIR(W_TUGAS) | A_BOLD);
     for (size_t i = 0; i < g.tugas.size(); i++)
-        mvaddch(g.tugas[i].y, g.tugas[i].x, g.tugas[i].tipe);
+        mvaddch(syObjek(m, g.tugas[i].y), sx(g.tugas[i].x), g.tugas[i].tipe);
     attroff(COLOR_PAIR(W_TUGAS) | A_BOLD);
 
-    int py = g.p.y - (g.p.lompat > 0 ? 1 : 0);
+    int py = syObjek(m, g.p.y);
+    if (g.p.lompat > 0) py -= max(1, (LINES + GRID_Y - 1) / GRID_Y);  // tinggi lompat ikut skala
     attron(COLOR_PAIR(W_PEMAIN) | A_BOLD);
     if (g.p.kebal > 0 && (g.frame / 3) % 2 == 0) attron(A_REVERSE);
-    mvaddch(py, g.p.x, '@');
+    mvaddch(py, sx(g.p.x), '@');
     attroff(A_REVERSE);
     attroff(COLOR_PAIR(W_PEMAIN) | A_BOLD);
 
-    mvprintw(22, 0, "Peta %d: %s", g.level, m.nama);
-    mvaddstr(23, 0, "Panah: gerak/tangga  Spasi: lompat  P: pause  Q: keluar");
+    mvprintw(LINES - 2, 0, "Peta %d: %s", g.level, m.nama);
+    mvaddstr(LINES - 1, 0, "Panah: gerak/tangga  Spasi: lompat  P: pause  Q: keluar");
     refresh();
 }
 
 // ---------------- Layar-layar ----------------
 void layarInstruksi() {
     nodelay(stdscr, FALSE);
-    erase();
-    attron(A_BOLD);
-    tengah(2, "== CARA BERMAIN ==");
-    attroff(A_BOLD);
-    tengah(4,  "Kamu Maba Nana (@). Panjat 5 gedung kampus yang berbeda");
-    tengah(5,  "sampai puncak untuk meraih Nilai A, hindari tugas Dosen Kong!");
-    tengah(7,  "Panah Kiri/Kanan : jalan     Panah Atas/Bawah : tangga (H)");
-    tengah(8,  "Spasi : lompat               P : pause     Q : keluar");
-    tengah(10, "Rintangan (tugas):");
-    tengah(11, "L = Laporan (lambat)       M = Makalah (sedang)");
-    tengah(12, "K = Kuis dadakan (cepat)   D = Deadline (paling cepat)");
-    tengah(14, "Power-Up:");
-    tengah(15, "C = Kopi : kebal 6 detik & hancurkan tugas (+200 poin)");
-    tengah(16, "+ = SKS Ekstra : tambah +1 nyawa (maks 5 SKS)");
-    tengah(17, "B = Bebas Tugas : bekukan semua tugas selama 4 detik");
-    tengah(19, "Lompati tugas = +100 poin, sampai puncak = +500 poin");
-    tengah(20, "Tiap level petanya beda. Tamatkan level 5 untuk WISUDA!");
-    tengah(22, "Tekan tombol apa saja untuk kembali");
-    refresh();
-    getch();
+    while (true) {
+        erase();
+        attron(A_BOLD);
+        tengah(sy(2), "== CARA BERMAIN ==");
+        attroff(A_BOLD);
+        tengah(sy(4),  "Kamu Maba Nana (@). Panjat 5 gedung kampus yang berbeda");
+        tengah(sy(5),  "sampai puncak untuk meraih Nilai A, hindari tugas Dosen Kong!");
+        tengah(sy(7),  "Panah Kiri/Kanan : jalan     Panah Atas/Bawah : tangga (H)");
+        tengah(sy(8),  "Spasi : lompat               P : pause     Q : keluar");
+        tengah(sy(10), "Rintangan (tugas):");
+        tengah(sy(11), "L = Laporan (lambat)       M = Makalah (sedang)");
+        tengah(sy(12), "K = Kuis dadakan (cepat)   D = Deadline (paling cepat)");
+        tengah(sy(14), "Power-Up:");
+        tengah(sy(15), "C = Kopi : kebal 6 detik & hancurkan tugas (+200 poin)");
+        tengah(sy(16), "+ = SKS Ekstra : tambah +1 nyawa (maks 5 SKS)");
+        tengah(sy(17), "B = Bebas Tugas : bekukan semua tugas selama 4 detik");
+        tengah(sy(19), "Lompati tugas = +100 poin, sampai puncak = +500 poin");
+        tengah(sy(20), "Tiap level petanya beda. Tamatkan level 5 untuk WISUDA!");
+        tengah(sy(22), "Tekan tombol apa saja untuk kembali");
+        refresh();
+        int c = getch();
+        if (c == KEY_RESIZE) { paksaGambarUlang(); continue; }
+        break;
+    }
 }
 
 int menuUtama(int highscore) {
@@ -440,16 +475,17 @@ int menuUtama(int highscore) {
     while (true) {
         erase();
         attron(COLOR_PAIR(W_BOSS) | A_BOLD);
-        tengah(4, "=============================");
-        tengah(5, "   K A M P U S   K O N G     ");
-        tengah(6, "=============================");
+        tengah(sy(4), "=============================");
+        tengah(sy(5), "   K A M P U S   K O N G     ");
+        tengah(sy(6), "=============================");
         attroff(COLOR_PAIR(W_BOSS) | A_BOLD);
-        tengah(9, "Panjat 5 gedung berbeda, hindari tugas!");
-        mvprintw(11, (COLS - 18) / 2, "High Score : %05d", highscore);
-        tengah(14, "[ENTER] Mulai   [I] Instruksi   [Q] Keluar");
+        tengah(sy(9), "Panjat 5 gedung berbeda, hindari tugas!");
+        mvprintw(sy(11), (COLS - 18) / 2, "High Score : %05d", highscore);
+        tengah(sy(14), "[ENTER] Mulai   [I] Instruksi   [Q] Keluar");
         refresh();
 
         int ch = getch();
+        if (ch == KEY_RESIZE) { paksaGambarUlang(); continue; }
         if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) return 'm';
         if (ch == 'i' || ch == 'I') layarInstruksi();
         if (ch == 'q' || ch == 'Q') return 'q';
@@ -458,17 +494,18 @@ int menuUtama(int highscore) {
 
 bool layarGameOver(const Game &g) {
     nodelay(stdscr, FALSE);
-    erase();
-    attron(COLOR_PAIR(W_TUGAS) | A_BOLD);
-    tengah(7, "=== GAME OVER ===");
-    tengah(8, "SKS habis, kamu harus mengulang semester!");
-    attroff(COLOR_PAIR(W_TUGAS) | A_BOLD);
-    mvprintw(10, (COLS - 18) / 2, "Skor       : %05d", g.skor);
-    mvprintw(11, (COLS - 18) / 2, "High Score : %05d", g.highscore);
-    tengah(14, "[R] Main lagi   [Q] Keluar");
-    refresh();
     while (true) {
+        erase();
+        attron(COLOR_PAIR(W_TUGAS) | A_BOLD);
+        tengah(sy(7), "=== GAME OVER ===");
+        tengah(sy(8), "SKS habis, kamu harus mengulang semester!");
+        attroff(COLOR_PAIR(W_TUGAS) | A_BOLD);
+        mvprintw(sy(10), (COLS - 18) / 2, "Skor       : %05d", g.skor);
+        mvprintw(sy(11), (COLS - 18) / 2, "High Score : %05d", g.highscore);
+        tengah(sy(14), "[R] Main lagi   [Q] Keluar");
+        refresh();
         int ch = getch();
+        if (ch == KEY_RESIZE) { paksaGambarUlang(); continue; }
         if (ch == 'r' || ch == 'R') return true;
         if (ch == 'q' || ch == 'Q') return false;
     }
@@ -476,17 +513,18 @@ bool layarGameOver(const Game &g) {
 
 bool layarMenang(const Game &g) {
     nodelay(stdscr, FALSE);
-    erase();
-    attron(COLOR_PAIR(W_TUJUAN) | A_BOLD);
-    tengah(6, "=== SELAMAT, KAMU WISUDA! ===");
-    tengah(8, "5 gedung ditaklukkan, Nilai A di tangan!");
-    attroff(COLOR_PAIR(W_TUJUAN) | A_BOLD);
-    mvprintw(10, (COLS - 18) / 2, "Skor       : %05d", g.skor);
-    mvprintw(11, (COLS - 18) / 2, "High Score : %05d", g.highscore);
-    tengah(14, "[R] Main lagi   [Q] Keluar");
-    refresh();
     while (true) {
+        erase();
+        attron(COLOR_PAIR(W_TUJUAN) | A_BOLD);
+        tengah(sy(6), "=== SELAMAT, KAMU WISUDA! ===");
+        tengah(sy(8), "5 gedung ditaklukkan, Nilai A di tangan!");
+        attroff(COLOR_PAIR(W_TUJUAN) | A_BOLD);
+        mvprintw(sy(10), (COLS - 18) / 2, "Skor       : %05d", g.skor);
+        mvprintw(sy(11), (COLS - 18) / 2, "High Score : %05d", g.highscore);
+        tengah(sy(14), "[R] Main lagi   [Q] Keluar");
+        refresh();
         int ch = getch();
+        if (ch == KEY_RESIZE) { paksaGambarUlang(); continue; }
         if (ch == 'r' || ch == 'R') return true;
         if (ch == 'q' || ch == 'Q') return false;
     }
@@ -494,7 +532,7 @@ bool layarMenang(const Game &g) {
 
 void pesan(const char *teks) {
     attron(A_REVERSE | A_BOLD);
-    tengah(11, teks);
+    tengah(sy(11), teks);
     attroff(A_REVERSE | A_BOLD);
     refresh();
     napms(1200);
@@ -504,8 +542,15 @@ void pesan(const char *teks) {
 HasilMain mainkan(Game &g) {
     nodelay(stdscr, TRUE);
     int levelTampil = 0;
+    int lastCols = COLS, lastLines = LINES;
     while (true) {
         const Map &m = *g.map;
+
+        // ukuran terminal berubah (window di-resize) -> gambar ulang total
+        if (COLS != lastCols || LINES != lastLines) {
+            lastCols = COLS; lastLines = LINES;
+            paksaGambarUlang();
+        }
 
         // tampilkan nama peta setiap ganti level
         if (levelTampil != g.level) {
@@ -519,13 +564,22 @@ HasilMain mainkan(Game &g) {
         int ch = getch();
         flushinp();
 
+        if (ch == KEY_RESIZE) paksaGambarUlang();
         if (ch == 'q' || ch == 'Q') return HASIL_KELUAR;
         if (ch == 'p' || ch == 'P') {
-            tengah(11, " == PAUSE (tekan P) == ");
+            tengah(sy(11), " == PAUSE (tekan P) == ");
             refresh();
             nodelay(stdscr, FALSE);
             int c;
-            do { c = getch(); } while (c != 'p' && c != 'P' && c != 'q' && c != 'Q');
+            do {
+                c = getch();
+                if (c == KEY_RESIZE) {
+                    paksaGambarUlang();
+                    gambar(g);
+                    tengah(sy(11), " == PAUSE (tekan P) == ");
+                    refresh();
+                }
+            } while (c != 'p' && c != 'P' && c != 'q' && c != 'Q');
             nodelay(stdscr, TRUE);
             if (c == 'q' || c == 'Q') return HASIL_KELUAR;
             continue;
@@ -577,7 +631,7 @@ HasilMain mainkan(Game &g) {
         if (g.p.beku > 0) g.p.beku--;
         g.frame++;
 
-        gambar(g);
+        gambar(g);   // digambar ulang tiap frame -> otomatis ikut ukuran terminal terbaru
         napms(FRAME_MS);
     }
 }
@@ -591,9 +645,10 @@ int main() {
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    if (LINES < 24 || COLS < 60) {
+    if (LINES < GRID_Y || COLS < GRID_X) {
         endwin();
-        printf("Terminal terlalu kecil. Minimal 60 kolom x 24 baris (sekarang %d x %d).\n", COLS, LINES);
+        printf("Terminal terlalu kecil. Minimal %d kolom x %d baris (sekarang %d x %d).\n",
+               GRID_X, GRID_Y, COLS, LINES);
         return 1;
     }
 
